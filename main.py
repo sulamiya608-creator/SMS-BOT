@@ -2,9 +2,13 @@ import os
 import random
 import string
 import sqlite3
-import asyncio
+import requests
 import logging
+import asyncio
+import threading
 from datetime import datetime, timedelta
+from flask import Flask
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton
@@ -13,69 +17,61 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
 )
-import httpx
 
 # ==================== CONFIGURATION ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8625002120:AAHJmcspMjsOW5IbrxprdQgX8gZ3Ss7wGFw")
-CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "suteam19").lstrip("@")
+BOT_TOKEN = "8625002120:AAHJmcspMjsOW5IbrxprdQgX8gZ3Ss7wGFw"
 
-_admin_ids_env = os.environ.get("ADMIN_IDS", "8673895274")
-ADMIN_IDS = [int(x.strip()) for x in _admin_ids_env.split(",") if x.strip().isdigit()]
+CHANNEL_USERNAME = "suteam19"          # without @
+ADMIN_IDS = [8673895274]               # Admin Telegram IDs
+ADMIN_USERNAME = "jannat2764"          # without @
+DEVELOPER_USERNAME = "jannat2764"      # without @
 
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "jannat2764").lstrip("@")
-DEVELOPER_USERNAME = os.environ.get("DEVELOPER_USERNAME", "srrakib321").lstrip("@")
-API_URL = os.environ.get("API_URL", "https://kalqqkfhzkj.vercel.app/bomb")
+API_URL = "https://kalqqkfhzkj.vercel.app/bomb"
 
-# ---- Database path (Render persistent disk mounts at /data) ----
-DATA_DIR = os.environ.get("DATA_DIR")
-if not DATA_DIR:
-    DATA_DIR = "/data" if os.path.isdir("/data") else "."
-try:
-    os.makedirs(DATA_DIR, exist_ok=True)
-except Exception:
-    DATA_DIR = "."
-DB_FILE = os.path.join(DATA_DIR, "bot_database.db")
-
-# Pricing
 SMS_DURATIONS = {
     "2": {"minutes": 2, "credits": 5},
     "3": {"minutes": 3, "credits": 8},
     "4": {"minutes": 4, "credits": 10},
-    "5": {"minutes": 5, "credits": 12},
+    "5": {"minutes": 5, "credits": 12}
 }
 
 CREDIT_PACKAGES = {
-    "20_credits":  {"credits": 20,  "price": 20,  "label": "20 Credits — ৳20"},
-    "50_credits":  {"credits": 50,  "price": 40,  "label": "50 Credits — ৳40"},
-    "100_credits": {"credits": 100, "price": 70,  "label": "100 Credits — ৳70"},
-    "vip_7":       {"credits": 0,   "price": 80,  "label": "VIP 7 Days — ৳80",  "vip_days": 7},
-    "vip_30":      {"credits": 0,   "price": 200, "label": "VIP 30 Days — ৳200", "vip_days": 30},
+    "20_credits": {"credits": 20, "price": 20, "label": "20 Credits — ৳20"},
+    "50_credits": {"credits": 50, "price": 40, "label": "50 Credits — ৳40"},
+    "100_credits": {"credits": 100, "price": 70, "label": "100 Credits — ৳70"},
+    "vip_7": {"credits": 0, "price": 80, "label": "VIP 7 Days — ৳80", "vip_days": 7},
+    "vip_30": {"credits": 0, "price": 200, "label": "VIP 30 Days — ৳200", "vip_days": 30}
 }
 
 DAILY_BONUS_CREDITS = 2
 DAILY_BONUS_COOLDOWN_HOURS = 24
 REFERRAL_REWARD_CREDITS = 5
 
-# Logging
+# Render-এ পারমিশন সমস্যা এড়াতে /tmp ব্যবহার
+DB_FILE = "/tmp/bot_database.db"
+
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Menu texts (used to clear any pending state)
-MENU_TEXTS = {
-    "📩 SMS Bomber", "👤 Profile", "💳 Buy Subscription & Credit",
-    "🎁 Daily Bonus", "🎁 Refer & Earn", "🎟 Redeem Code",
-    "📞 Support", "⚙️ Admin Panel", "⬅️ Back",
-}
+# ==================== FLASK DUMMY SERVER ====================
+web_app = Flask(__name__)
 
+@web_app.route('/')
+def health_check():
+    return "Bot is alive!", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    web_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # ==================== DATABASE ====================
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         name TEXT,
         username TEXT,
@@ -88,49 +84,44 @@ def init_db():
         daily_bonus_claimed TEXT,
         registered_at TEXT,
         total_requests INTEGER DEFAULT 0
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS redeem_codes (
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS redeem_codes (
         code TEXT PRIMARY KEY,
         credits INTEGER,
         max_uses INTEGER,
         used_count INTEGER DEFAULT 0,
         expiry TEXT,
         created_at TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS redeemed_history (
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS redeemed_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         code TEXT,
         credits INTEGER,
         redeemed_at TEXT,
         UNIQUE(user_id, code)
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS payments (
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         package TEXT,
         amount INTEGER,
         status TEXT DEFAULT 'pending',
         created_at TEXT
-    )""")
+    )''')
     conn.commit()
     conn.close()
-    logger.info(f"Database initialized at {DB_FILE}")
-
 
 def get_db():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def get_user(user_id):
     conn = get_db()
-    try:
-        return conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    finally:
-        conn.close()
-
+    user = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return user
 
 def create_user(user_id, name, username, referral_code=None, referred_by=None):
     conn = get_db()
@@ -138,10 +129,8 @@ def create_user(user_id, name, username, referral_code=None, referred_by=None):
         if not referral_code:
             referral_code = generate_referral_code()
         conn.execute(
-            "INSERT OR IGNORE INTO users "
-            "(user_id, name, username, referral_code, referred_by, registered_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, name, username, referral_code, referred_by, datetime.now().isoformat()),
+            "INSERT OR IGNORE INTO users (user_id, name, username, referral_code, referred_by, registered_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, name, username, referral_code, referred_by, datetime.now().isoformat())
         )
         conn.commit()
     except Exception as e:
@@ -149,49 +138,22 @@ def create_user(user_id, name, username, referral_code=None, referred_by=None):
     finally:
         conn.close()
 
-
-def update_user_credits(user_id, amount, operation="add"):
-    conn = get_db()
-    try:
-        if operation == "add":
-            conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (amount, user_id))
-        elif operation == "subtract":
-            conn.execute("UPDATE users SET credits = MAX(0, credits - ?) WHERE user_id = ?", (amount, user_id))
-        elif operation == "set":
-            conn.execute("UPDATE users SET credits = ? WHERE user_id = ?", (amount, user_id))
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Error updating credits: {e}")
-        return False
-    finally:
-        conn.close()
-
-
 def generate_referral_code():
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
-
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 def generate_redeem_code():
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=12))
-
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-
-def is_vip_active(user_row):
-    if not user_row:
-        return False
-    if not user_row["is_vip"]:
-        return False
-    if not user_row["vip_expiry"]:
+def is_vip_active(user):
+    if not user or not user['is_vip'] or not user['vip_expiry']:
         return False
     try:
-        return datetime.fromisoformat(user_row["vip_expiry"]) > datetime.now()
-    except Exception:
+        return datetime.fromisoformat(user['vip_expiry']) > datetime.now()
+    except:
         return False
-
 
 # ==================== KEYBOARDS ====================
 def get_main_keyboard(user_id):
@@ -199,424 +161,365 @@ def get_main_keyboard(user_id):
         [KeyboardButton("📩 SMS Bomber"), KeyboardButton("👤 Profile")],
         [KeyboardButton("💳 Buy Subscription & Credit"), KeyboardButton("🎁 Daily Bonus")],
         [KeyboardButton("🎁 Refer & Earn"), KeyboardButton("🎟 Redeem Code")],
-        [KeyboardButton("📞 Support")],
+        [KeyboardButton("📞 Support")]
     ]
     if is_admin(user_id):
         keyboard.append([KeyboardButton("⚙️ Admin Panel")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-
 def get_back_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("⬅️ Back")]], resize_keyboard=True)
 
-
 def get_duration_keyboard():
     keyboard = [
-        [InlineKeyboardButton("2 Minutes (5 credits)", callback_data="sms_dur_2"),
-         InlineKeyboardButton("3 Minutes (8 credits)", callback_data="sms_dur_3")],
-        [InlineKeyboardButton("4 Minutes (10 credits)", callback_data="sms_dur_4"),
-         InlineKeyboardButton("5 Minutes (12 credits)", callback_data="sms_dur_5")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="sms_cancel")],
+        [InlineKeyboardButton("2 Min (5 cr)", callback_data="sms_dur_2"),
+         InlineKeyboardButton("3 Min (8 cr)", callback_data="sms_dur_3")],
+        [InlineKeyboardButton("4 Min (10 cr)", callback_data="sms_dur_4"),
+         InlineKeyboardButton("5 Min (12 cr)", callback_data="sms_dur_5")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="sms_cancel")]
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 def get_admin_keyboard():
     keyboard = [
         [InlineKeyboardButton("📊 Total Users", callback_data="admin_stats")],
         [InlineKeyboardButton("📜 User List", callback_data="admin_userlist_0")],
-        [InlineKeyboardButton("➕ Add Credit", callback_data="admin_addcredit")],
+        [InlineKeyboardButton("➕ Add/Sub Credit", callback_data="admin_addcredit")],
         [InlineKeyboardButton("🧹 Reset Credit", callback_data="admin_resetcredit")],
         [InlineKeyboardButton("🚫 Ban User", callback_data="admin_ban")],
         [InlineKeyboardButton("✅ Unban User", callback_data="admin_unban")],
         [InlineKeyboardButton("🎟 Gen Redeem Code", callback_data="admin_gencode")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast")],
         [InlineKeyboardButton("⭐ VIP Management", callback_data="admin_vip")],
-        [InlineKeyboardButton("⬅️ Main Menu", callback_data="admin_mainmenu")],
+        [InlineKeyboardButton("⬅️ Main Menu", callback_data="admin_mainmenu")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_join_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
+        [InlineKeyboardButton("✅ Verify Join", callback_data="check_join")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-# ==================== HELPERS ====================
-async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text="Main Menu"):
-    """Send a fresh message with the main reply keyboard (avoids edit-message issues)."""
-    chat_id = update.effective_chat.id
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=get_main_keyboard(chat_id))
-
-
-async def call_bomb_api(number, minutes):
+# ==================== FORCE JOIN CHECK ====================
+async def is_user_joined(context, user_id):
+    """Return True if user is a member, False otherwise"""
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(API_URL, json={"number": number, "amount": minutes})
-            return r.status_code, r.text
+        member = await context.bot.get_chat_member(
+            chat_id=f"@{CHANNEL_USERNAME}",
+            user_id=user_id
+        )
+        if member.status in ["creator", "administrator", "member"]:
+            return True
+        if member.status == "restricted" and getattr(member, "is_member", False):
+            return True
+        return False
     except Exception as e:
-        return None, str(e)
+        logger.error(f"ForceJoin check error: {e}")
+        # If bot is not admin or any API error, allow (don't block user)
+        return True
 
+async def send_join_prompt(update_or_query, context):
+    text = (
+        "⚠️ *You Must Join Our Channel First!*\n\n"
+        f"📢 Channel: @{CHANNEL_USERNAME}\n\n"
+        "1️⃣ Join the channel\n"
+        "2️⃣ Then press ✅ Verify Join"
+    )
+    if isinstance(update_or_query, Update):
+        await update_or_query.message.reply_text(
+            text, parse_mode="Markdown", reply_markup=get_join_keyboard()
+        )
+    else:
+        try:
+            await update_or_query.edit_message_text(
+                text, parse_mode="Markdown", reply_markup=get_join_keyboard()
+            )
+        except Exception:
+            await update_or_query.message.reply_text(
+                text, parse_mode="Markdown", reply_markup=get_join_keyboard()
+            )
 
-# ==================== USER HANDLERS ====================
+# ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    # Ban check first
-    existing = get_user(user_id)
-    if existing and existing["is_banned"]:
-        await update.message.reply_text("🚫 You are banned from using this bot.")
+    # Force join check
+    joined = await is_user_joined(context, user_id)
+    if not joined:
+        await send_join_prompt(update, context)
         return
-
-    # Channel membership
-    try:
-        chat_member = await context.bot.get_chat_member(
-            chat_id=f"@{CHANNEL_USERNAME}", user_id=user_id
-        )
-        if chat_member.status in ("left", "kicked"):
-            keyboard = [
-                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
-                [InlineKeyboardButton("✅ Joined", callback_data="check_join")],
-            ]
-            await update.message.reply_text(
-                f"⚠️ *You Must Join Our Channel First!*\n\n📢 Channel: @{CHANNEL_USERNAME}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-            return
-    except Exception as e:
-        logger.warning(f"Channel check failed (bot must be admin in @{CHANNEL_USERNAME}): {e}")
 
     # Referral
     referred_by = None
     if context.args:
-        ref_code = context.args[0].strip().upper()
+        ref_code = context.args[0]
         conn = get_db()
-        try:
-            referrer = conn.execute(
-                "SELECT user_id FROM users WHERE referral_code = ?", (ref_code,)
-            ).fetchone()
-        finally:
-            conn.close()
-        if referrer and referrer["user_id"] != user_id:
-            referred_by = referrer["user_id"]
+        referrer = conn.execute("SELECT user_id FROM users WHERE referral_code = ?", (ref_code,)).fetchone()
+        conn.close()
+        if referrer and referrer['user_id'] != user_id:
+            referred_by = referrer['user_id']
 
+    existing = get_user(user_id)
     if not existing:
         create_user(user_id, user.first_name, user.username, referred_by=referred_by)
         if referred_by:
             conn = get_db()
-            try:
-                conn.execute(
-                    "UPDATE users SET credits = credits + ? WHERE user_id = ?",
-                    (REFERRAL_REWARD_CREDITS, referred_by),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?",
+                         (REFERRAL_REWARD_CREDITS, referred_by))
+            conn.commit()
+            conn.close()
             try:
                 await context.bot.send_message(
                     chat_id=referred_by,
-                    text=f"🎉 You earned {REFERRAL_REWARD_CREDITS} credits from a new referral!",
+                    text=f"🎉 You earned {REFERRAL_REWARD_CREDITS} credits from a new referral!"
                 )
-            except Exception:
+            except:
                 pass
     else:
         conn = get_db()
-        try:
-            conn.execute(
-                "UPDATE users SET name = ?, username = ? WHERE user_id = ?",
-                (user.first_name, user.username, user_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        conn.execute("UPDATE users SET name = ?, username = ? WHERE user_id = ?",
+                     (user.first_name, user.username, user_id))
+        conn.commit()
+        conn.close()
 
     await update.message.reply_text(
         f"✅ Welcome {user.first_name}!\n\nUse the menu below to navigate.",
-        reply_markup=get_main_keyboard(user_id),
+        reply_markup=get_main_keyboard(user_id)
     )
-
 
 async def check_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
 
-    try:
-        chat_member = await context.bot.get_chat_member(
-            chat_id=f"@{CHANNEL_USERNAME}", user_id=user_id
-        )
-        joined = chat_member.status not in ("left", "kicked")
-    except Exception as e:
-        logger.warning(f"Channel check failed: {e}")
-        joined = True  # fail-open if bot can't check
-
+    joined = await is_user_joined(context, user_id)
     if not joined:
-        keyboard = [
-            [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")],
-            [InlineKeyboardButton("✅ Joined", callback_data="check_join")],
-        ]
-        await query.edit_message_text(
-            f"⚠️ *You Must Join Our Channel First!*\n\n📢 Channel: @{CHANNEL_USERNAME}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await query.answer("❌ You haven't joined yet! Join the channel first.", show_alert=True)
         return
 
-    await query.edit_message_text("✅ Verified!")
-    # Send fresh message with main keyboard (ReplyKeyboardMarkup can't be attached to edit)
+    await query.edit_message_text("✅ Verified! Use the menu below.")
     await context.bot.send_message(
-        chat_id=user_id, text="Main Menu", reply_markup=get_main_keyboard(user_id)
+        chat_id=user_id,
+        text="Main Menu",
+        reply_markup=get_main_keyboard(user_id)
     )
 
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.effective_user:
-        return
     user = update.effective_user
     user_id = user.id
-    text = update.message.text or ""
+    text = update.message.text
+
+    # Admin input priority
+    if is_admin(user_id) and context.user_data.get('admin_state'):
+        await handle_admin_input(update, context)
+        return
 
     # Ensure user exists
     existing = get_user(user_id)
     if not existing:
+        joined = await is_user_joined(context, user_id)
+        if not joined:
+            await send_join_prompt(update, context)
+            return
         create_user(user_id, user.first_name, user.username)
-        existing = get_user(user_id)
 
-    # Ban check
-    if existing and existing["is_banned"]:
+    user_data = get_user(user_id)
+    if user_data and user_data['is_banned']:
         await update.message.reply_text("🚫 You are banned from using this bot.")
         return
 
-    # ---- Menu buttons (clear pending states) ----
-    if text in MENU_TEXTS:
-        context.user_data["state"] = None
-        context.user_data["admin_state"] = None
-
-        if text == "📩 SMS Bomber":
-            context.user_data["state"] = "awaiting_number"
-            await update.message.reply_text(
-                "📩 *SMS Bomber*\n\nSend me a phone number to start.\nExample: `018XXXXXXXX`",
-                parse_mode="Markdown",
-                reply_markup=get_back_keyboard(),
-            )
+    # ============ MAIN MENU ============
+    if text == "📩 SMS Bomber":
+        joined = await is_user_joined(context, user_id)
+        if not joined:
+            await send_join_prompt(update, context)
             return
+        context.user_data['state'] = 'awaiting_number'
+        await update.message.reply_text(
+            "📩 *SMS Bomber*\n\nSend me a phone number (e.g. `018XXXXXXXX`):",
+            parse_mode="Markdown",
+            reply_markup=get_back_keyboard()
+        )
+        return
 
-        if text == "👤 Profile":
-            user_data = get_user(user_id)
-            vip_status = "VIP ⭐" if is_vip_active(user_data) else "Normal"
-            vip_expiry = ""
-            if user_data["is_vip"] and user_data["vip_expiry"]:
-                vip_expiry = f"\nVIP Expiry: {user_data['vip_expiry'][:10]}"
-            await update.message.reply_text(
-                f"👤 *Profile*\n\n"
-                f"Name: {user_data['name']}\n"
-                f"User ID: `{user_data['user_id']}`\n"
-                f"Credit: {user_data['credits']}\n"
-                f"Member Type: {vip_status}{vip_expiry}",
-                parse_mode="Markdown",
-                reply_markup=get_main_keyboard(user_id),
-            )
-            return
+    elif text == "👤 Profile":
+        u = get_user(user_id)
+        vip_type = "⭐ VIP" if is_vip_active(u) else "👤 Normal"
+        vip_exp = f"\nVIP Expiry: {u['vip_expiry'][:10]}" if is_vip_active(u) else ""
+        await update.message.reply_text(
+            f"👤 *Profile*\n\n"
+            f"Name: {u['name']}\n"
+            f"User ID: `{u['user_id']}`\n"
+            f"Credit: {u['credits']}\n"
+            f"Member Type: {vip_type}{vip_exp}",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
 
-        if text == "💳 Buy Subscription & Credit":
-            msg = "💳 *Buy Subscription & Credit*\n\n"
-            for _, pkg in CREDIT_PACKAGES.items():
-                msg += f"• {pkg['label']}\n"
-            msg += (
-                "\n💰 *Payment Instructions:*\n"
-                f"Contact admin @{ADMIN_USERNAME} to purchase.\n"
-                "Send payment proof to admin.\n"
-                "Credits/VIP will be added after verification."
-            )
-            keyboard = [[InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME}")]]
-            await update.message.reply_text(
-                msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
+    elif text == "💳 Buy Subscription & Credit":
+        msg = "💳 *Buy Subscription & Credit*\n\n"
+        for k, pkg in CREDIT_PACKAGES.items():
+            msg += f"• {pkg['label']}\n"
+        msg += f"\n💰 *Payment:* Contact @{ADMIN_USERNAME} and send payment proof."
+        msg += "\nCredits/VIP added after admin verification."
+        keyboard = [[InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME}")]]
+        await update.message.reply_text(msg, parse_mode="Markdown",
+                                        reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
-        if text == "🎁 Daily Bonus":
-            user_data = get_user(user_id)
-            now = datetime.now()
-            if user_data["daily_bonus_claimed"]:
-                try:
-                    last_claim = datetime.fromisoformat(user_data["daily_bonus_claimed"])
-                    next_claim = last_claim + timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS)
-                    if now < next_claim:
-                        remaining = next_claim - now
-                        hours = remaining.seconds // 3600
-                        minutes = (remaining.seconds % 3600) // 60
-                        await update.message.reply_text(
-                            f"⏳ You already claimed today's bonus!\nNext claim in: {hours}h {minutes}m",
-                            reply_markup=get_main_keyboard(user_id),
-                        )
-                        return
-                except Exception:
-                    pass
-            conn = get_db()
-            try:
-                conn.execute(
-                    "UPDATE users SET credits = credits + ?, daily_bonus_claimed = ? WHERE user_id = ?",
-                    (DAILY_BONUS_CREDITS, now.isoformat(), user_id),
+    elif text == "🎁 Daily Bonus":
+        u = get_user(user_id)
+        now = datetime.now()
+        if u['daily_bonus_claimed']:
+            last = datetime.fromisoformat(u['daily_bonus_claimed'])
+            nxt = last + timedelta(hours=DAILY_BONUS_COOLDOWN_HOURS)
+            if now < nxt:
+                rem = nxt - now
+                h, m = rem.seconds // 3600, (rem.seconds % 3600) // 60
+                await update.message.reply_text(
+                    f"⏳ Already claimed!\nNext in: {h}h {m}m",
+                    reply_markup=get_main_keyboard(user_id)
                 )
-                conn.commit()
-            finally:
-                conn.close()
-            new_bal = get_user(user_id)["credits"]
-            await update.message.reply_text(
-                f"🎁 Daily Bonus Claimed!\n\n+{DAILY_BONUS_CREDITS} credits added.\nNew balance: {new_bal} credits",
-                reply_markup=get_main_keyboard(user_id),
-            )
-            return
-
-        if text == "🎁 Refer & Earn":
-            user_data = get_user(user_id)
-            if not user_data["referral_code"]:
-                code = generate_referral_code()
-                conn = get_db()
-                try:
-                    conn.execute(
-                        "UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id)
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-                user_data = get_user(user_id)
-            bot_username = context.bot.username
-            ref_link = f"https://t.me/{bot_username}?start={user_data['referral_code']}"
-            await update.message.reply_text(
-                f"🎁 *Refer & Earn*\n\n"
-                f"Share this link and earn {REFERRAL_REWARD_CREDITS} credits per referral!\n\n"
-                f"🔗 Your link:\n`{ref_link}`\n\n"
-                f"Reward: {REFERRAL_REWARD_CREDITS} credits per new user",
-                parse_mode="Markdown",
-                reply_markup=get_main_keyboard(user_id),
-            )
-            return
-
-        if text == "🎟 Redeem Code":
-            context.user_data["state"] = "awaiting_redeem_code"
-            await update.message.reply_text(
-                "🎟 *Redeem Code*\n\nSend me your redeem code:",
-                parse_mode="Markdown",
-                reply_markup=get_back_keyboard(),
-            )
-            return
-
-        if text == "📞 Support":
-            msg = (
-                "📞 *Support*\n\n"
-                "💰 *How credits work:*\n"
-                "Credits are used to run SMS tests. Each test costs credits based on duration.\n\n"
-                "📩 *SMS Test Pricing:*\n"
-                "• 2 minutes = 5 credits\n"
-                "• 3 minutes = 8 credits\n"
-                "• 4 minutes = 10 credits\n"
-                "• 5 minutes = 12 credits\n\n"
-                "⭐ *VIP:* Unlimited usage without credit deduction.\n\n"
-                "💳 *How to buy credits/VIP:*\n"
-                f"Contact @{ADMIN_USERNAME} for purchase.\n\n"
-                "🎟 *How to use redeem codes:*\n"
-                "Go to Redeem Code menu and enter your code.\n\n"
-                f"👤 *Admin:* @{ADMIN_USERNAME}"
-            )
-            keyboard = [[InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME}")]]
-            await update.message.reply_text(
-                msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            return
-
-        if text == "⚙️ Admin Panel":
-            if not is_admin(user_id):
-                await update.message.reply_text("⛔ Unauthorized.")
                 return
-            await update.message.reply_text(
-                "⚙️ *Admin Panel*\n\nSelect an option:",
-                parse_mode="Markdown",
-                reply_markup=get_admin_keyboard(),
-            )
+        conn = get_db()
+        conn.execute("UPDATE users SET credits = credits + ?, daily_bonus_claimed = ? WHERE user_id = ?",
+                     (DAILY_BONUS_CREDITS, now.isoformat(), user_id))
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(
+            f"🎁 Daily Bonus Claimed!\n+{DAILY_BONUS_CREDITS} credits\nBalance: {get_user(user_id)['credits']}",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
+
+    elif text == "🎁 Refer & Earn":
+        u = get_user(user_id)
+        if not u['referral_code']:
+            code = generate_referral_code()
+            conn = get_db()
+            conn.execute("UPDATE users SET referral_code = ? WHERE user_id = ?", (code, user_id))
+            conn.commit()
+            conn.close()
+            u = get_user(user_id)
+        link = f"https://t.me/{context.bot.username}?start={u['referral_code']}"
+        await update.message.reply_text(
+            f"🎁 *Refer & Earn*\n\n"
+            f"🔗 Your link:\n`{link}`\n\n"
+            f"💰 Reward: {REFERRAL_REWARD_CREDITS} credits per new user",
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
+
+    elif text == "🎟 Redeem Code":
+        context.user_data['state'] = 'awaiting_redeem_code'
+        await update.message.reply_text(
+            "🎟 Send your redeem code:",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    elif text == "📞 Support":
+        msg = (
+            "📞 *Support*\n\n"
+            "💰 *Credits:* Used to run SMS tests.\n\n"
+            "📩 *SMS Test Pricing:*\n"
+            "• 2 min = 5 credits\n• 3 min = 8 credits\n"
+            "• 4 min = 10 credits\n• 5 min = 12 credits\n\n"
+            "⭐ *VIP:* Unlimited usage, no credit deduction.\n\n"
+            f"💳 *Buy credits/VIP:* Contact @{ADMIN_USERNAME}\n\n"
+            "🎟 *Redeem Codes:* Use the Redeem Code menu.\n\n"
+            f"👤 *Admin:* @{ADMIN_USERNAME}"
+        )
+        keyboard = [[InlineKeyboardButton("📞 Contact Admin", url=f"https://t.me/{ADMIN_USERNAME}")]]
+        await update.message.reply_text(msg, parse_mode="Markdown",
+                                        reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    elif text == "⚙️ Admin Panel":
+        if not is_admin(user_id):
+            await update.message.reply_text("⛔ Unauthorized.")
             return
+        await update.message.reply_text(
+            "⚙️ *Admin Panel*\n\nSelect an option:",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+        return
 
-        if text == "⬅️ Back":
-            await update.message.reply_text("Main Menu", reply_markup=get_main_keyboard(user_id))
+    elif text == "⬅️ Back":
+        context.user_data['state'] = None
+        context.user_data['admin_state'] = None
+        await update.message.reply_text("Main Menu", reply_markup=get_main_keyboard(user_id))
+        return
+
+    # ============ STATE INPUTS ============
+    state = context.user_data.get('state')
+
+    if state == 'awaiting_number':
+        joined = await is_user_joined(context, user_id)
+        if not joined:
+            await send_join_prompt(update, context)
             return
-
-    # ---- Admin state takes priority over normal states ----
-    if is_admin(user_id) and context.user_data.get("admin_state"):
-        handled = await handle_admin_input(update, context)
-        if handled:
-            return
-
-    # ---- User states ----
-    state = context.user_data.get("state")
-
-    if state == "awaiting_number":
-        number = text.strip().lstrip("+")
+        number = text.strip()
         if not number.isdigit() or len(number) < 10 or len(number) > 15:
-            await update.message.reply_text("❌ Invalid phone number. Please send a valid number.")
+            await update.message.reply_text("❌ Invalid phone number. Send a valid number.")
             return
-        context.user_data["sms_number"] = number
-        context.user_data["state"] = "awaiting_duration"
+        context.user_data['sms_number'] = number
+        context.user_data['state'] = 'awaiting_duration'
         await update.message.reply_text(
             f"📱 Number: `{number}`\n\nSelect duration:",
             parse_mode="Markdown",
-            reply_markup=get_duration_keyboard(),
+            reply_markup=get_duration_keyboard()
         )
         return
 
-    if state == "awaiting_redeem_code":
+    if state == 'awaiting_redeem_code':
         code = text.strip().upper()
         conn = get_db()
-        try:
-            already = conn.execute(
-                "SELECT * FROM redeemed_history WHERE user_id = ? AND code = ?",
-                (user_id, code),
-            ).fetchone()
-            if already:
-                await update.message.reply_text(
-                    "❌ You already redeemed this code.", reply_markup=get_main_keyboard(user_id)
-                )
-                return
-
-            code_data = conn.execute("SELECT * FROM redeem_codes WHERE code = ?", (code,)).fetchone()
-            if not code_data:
-                await update.message.reply_text(
-                    "❌ Invalid code.", reply_markup=get_main_keyboard(user_id)
-                )
-                return
-            if code_data["expiry"]:
-                try:
-                    if datetime.fromisoformat(code_data["expiry"]) < datetime.now():
-                        await update.message.reply_text(
-                            "❌ Code expired.", reply_markup=get_main_keyboard(user_id)
-                        )
-                        return
-                except Exception:
-                    pass
-            if code_data["used_count"] >= code_data["max_uses"]:
-                await update.message.reply_text(
-                    "❌ Code usage limit reached.", reply_markup=get_main_keyboard(user_id)
-                )
-                return
-
-            conn.execute("UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = ?", (code,))
-            conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (code_data["credits"], user_id))
-            conn.execute(
-                "INSERT INTO redeemed_history (user_id, code, credits, redeemed_at) VALUES (?, ?, ?, ?)",
-                (user_id, code, code_data["credits"], datetime.now().isoformat()),
-            )
-            conn.commit()
-        finally:
+        already = conn.execute("SELECT * FROM redeemed_history WHERE user_id = ? AND code = ?",
+                               (user_id, code)).fetchone()
+        if already:
             conn.close()
-
-        context.user_data["state"] = None
-        new_bal = get_user(user_id)["credits"]
+            await update.message.reply_text("❌ Already redeemed.", reply_markup=get_main_keyboard(user_id))
+            context.user_data['state'] = None
+            return
+        cdata = conn.execute("SELECT * FROM redeem_codes WHERE code = ?", (code,)).fetchone()
+        if not cdata:
+            conn.close()
+            await update.message.reply_text("❌ Invalid code.", reply_markup=get_main_keyboard(user_id))
+            context.user_data['state'] = None
+            return
+        if cdata['expiry'] and datetime.fromisoformat(cdata['expiry']) < datetime.now():
+            conn.close()
+            await update.message.reply_text("❌ Code expired.", reply_markup=get_main_keyboard(user_id))
+            context.user_data['state'] = None
+            return
+        if cdata['used_count'] >= cdata['max_uses']:
+            conn.close()
+            await update.message.reply_text("❌ Usage limit reached.", reply_markup=get_main_keyboard(user_id))
+            context.user_data['state'] = None
+            return
+        conn.execute("UPDATE redeem_codes SET used_count = used_count + 1 WHERE code = ?", (code,))
+        conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (cdata['credits'], user_id))
+        conn.execute("INSERT INTO redeemed_history (user_id, code, credits, redeemed_at) VALUES (?, ?, ?, ?)",
+                     (user_id, code, cdata['credits'], datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
         await update.message.reply_text(
-            f"✅ Code redeemed!\n+{code_data['credits']} credits added.\nNew balance: {new_bal} credits",
-            reply_markup=get_main_keyboard(user_id),
+            f"✅ +{cdata['credits']} credits added!\nBalance: {get_user(user_id)['credits']}",
+            reply_markup=get_main_keyboard(user_id)
         )
+        context.user_data['state'] = None
         return
 
-    # Default
     await update.message.reply_text("Use the menu below.", reply_markup=get_main_keyboard(user_id))
 
-
+# ==================== SMS CALLBACK ====================
 async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -624,11 +527,10 @@ async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data
 
     if data == "sms_cancel":
-        context.user_data["state"] = None
+        context.user_data['state'] = None
         await query.edit_message_text("❌ Cancelled.")
-        await context.bot.send_message(
-            chat_id=user_id, text="Main Menu", reply_markup=get_main_keyboard(user_id)
-        )
+        await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                       reply_markup=get_main_keyboard(user_id))
         return
 
     duration_key = data.replace("sms_dur_", "")
@@ -637,471 +539,397 @@ async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     duration = SMS_DURATIONS[duration_key]
-    number = context.user_data.get("sms_number")
+    number = context.user_data.get('sms_number')
     if not number:
-        await query.edit_message_text("❌ Session expired. Please start again.")
+        await query.edit_message_text("❌ Session expired. Start again.")
         return
 
-    user_data = get_user(user_id)
-    vip = is_vip_active(user_data)
+    u = get_user(user_id)
+    vip = is_vip_active(u)
 
-    # Deduct credits (unless VIP)
     if not vip:
-        if user_data["credits"] < duration["credits"]:
+        if u['credits'] < duration['credits']:
             await query.edit_message_text(
-                f"❌ *Insufficient Credits!*\n\n"
-                f"Required: {duration['credits']} credits\n"
-                f"Your balance: {user_data['credits']} credits\n\n"
-                f"Please buy credits from the menu.",
-                parse_mode="Markdown",
+                f"❌ *Insufficient Credits!*\n\nRequired: {duration['credits']}\n"
+                f"Your balance: {u['credits']}\n\nBuy more from the menu.",
+                parse_mode="Markdown"
             )
-            context.user_data["state"] = None
+            context.user_data['state'] = None
             return
-        update_user_credits(user_id, duration["credits"], "subtract")
-
-    # Call API
-    status, body = await call_bomb_api(number, duration["minutes"])
-    ok = status is not None and 200 <= status < 300
-
-    if not ok:
-        # Refund if deduction happened
-        if not vip:
-            update_user_credits(user_id, duration["credits"], "add")
-        logger.error(f"API Error status={status} body={body}")
-        await query.edit_message_text(
-            "❌ *Request failed.*\nYour credits have been refunded. Please try again later.",
-            parse_mode="Markdown",
-        )
-        context.user_data["state"] = None
-        await context.bot.send_message(
-            chat_id=user_id, text="Main Menu", reply_markup=get_main_keyboard(user_id)
-        )
-        return
-
-    # Update request count
-    conn = get_db()
-    try:
-        conn.execute(
-            "UPDATE users SET total_requests = total_requests + 1 WHERE user_id = ?", (user_id,)
-        )
+        conn = get_db()
+        conn.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?",
+                     (duration['credits'], user_id))
         conn.commit()
-    finally:
         conn.close()
 
+    # API request in background thread
+    def call_api():
+        try:
+            r = requests.post(API_URL, json={"number": number, "amount": duration['minutes']},
+                              headers={"Content-Type": "application/json"}, timeout=15)
+            logger.info(f"API: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.error(f"API Error: {e}")
+
+    asyncio.create_task(asyncio.to_thread(call_api))
+
+    conn = get_db()
+    conn.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
     await query.edit_message_text(
-        f"✅ *Request Sent!*\n\n"
-        f"📱 Number: `{number}`\n"
-        f"⏱ Duration: {duration['minutes']} minutes\n"
-        f"💳 Credits used: {0 if vip else duration['credits']}{' (VIP)' if vip else ''}\n\n"
-        f"Your request is being processed...",
-        parse_mode="Markdown",
+        f"✅ *Request Sent!*\n\n📱 `{number}`\n⏱ {duration['minutes']} min\n"
+        f"💳 Credits used: {duration['credits'] if not vip else '0 (VIP)'}",
+        parse_mode="Markdown"
     )
 
-    # Notify admin
     try:
         await context.bot.send_message(
             chat_id=ADMIN_IDS[0],
-            text=(
-                f"🚨 NEW REQUEST\n\n"
-                f"👤 {user_data['name']} (@{user_data['username'] or 'NoUsername'})\n"
-                f"🆔 `{user_id}`\n"
-                f"📱 {number}\n"
-                f"⏱ {duration['minutes']} minutes\n"
-                f"💳 {duration['credits']} credits"
-            ),
-            parse_mode="Markdown",
+            text=(f"🚨 NEW REQUEST\n\n👤 {u['name']} (@{u['username'] or 'NoUsername'})\n"
+                  f"🆔 `{user_id}`\n📱 {number}\n⏱ {duration['minutes']} min\n"
+                  f"💳 {duration['credits']}"),
+            parse_mode="Markdown"
         )
     except Exception as e:
-        logger.error(f"Admin notify error: {e}")
+        logger.error(f"Admin notify: {e}")
 
-    context.user_data["state"] = None
-    await context.bot.send_message(
-        chat_id=user_id, text="Main Menu", reply_markup=get_main_keyboard(user_id)
-    )
+    context.user_data['state'] = None
+    await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                   reply_markup=get_main_keyboard(user_id))
 
-
-# ==================== ADMIN HANDLERS ====================
+# ==================== ADMIN CALLBACKS ====================
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = update.effective_user.id
 
     if not is_admin(user_id):
-        await query.edit_message_text("⛔ Unauthorized.")
+        await query.answer("⛔ Unauthorized.", show_alert=True)
         return
 
     data = query.data
 
     if data == "admin_mainmenu":
-        await query.edit_message_text("Returning to main menu...")
-        await context.bot.send_message(
-            chat_id=user_id, text="Main Menu", reply_markup=get_main_keyboard(user_id)
-        )
+        context.user_data['admin_state'] = None
+        await query.edit_message_text("Returning to Main Menu...")
+        await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                       reply_markup=get_main_keyboard(user_id))
         return
 
-    if data == "admin_stats":
+    elif data == "admin_stats":
         conn = get_db()
-        try:
-            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            vip = conn.execute("SELECT COUNT(*) FROM users WHERE is_vip = 1").fetchone()[0]
-            banned = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
-            total_requests = conn.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
-        finally:
-            conn.close()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        vip = conn.execute("SELECT COUNT(*) FROM users WHERE is_vip = 1").fetchone()[0]
+        banned = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1").fetchone()[0]
+        reqs = conn.execute("SELECT SUM(total_requests) FROM users").fetchone()[0] or 0
+        conn.close()
         await query.edit_message_text(
-            f"📊 *Statistics*\n\n"
-            f"👥 Total Users: {total}\n"
-            f"⭐ VIP Users: {vip}\n"
-            f"🚫 Banned Users: {banned}\n"
-            f"📩 Total Requests: {total_requests}",
+            f"📊 *Statistics*\n\n👥 Total Users: {total}\n⭐ VIP: {vip}\n🚫 Banned: {banned}\n📩 Requests: {reqs}",
             parse_mode="Markdown",
-            reply_markup=get_admin_keyboard(),
+            reply_markup=get_admin_keyboard()
         )
         return
 
-    if data.startswith("admin_userlist_"):
-        page = int(data.split("_")[2])
+    elif data.startswith("admin_userlist_"):
         conn = get_db()
-        try:
-            users = conn.execute(
-                "SELECT * FROM users ORDER BY user_id LIMIT 10 OFFSET ?", (page * 10,)
-            ).fetchall()
-            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        finally:
-            conn.close()
-
-        total_pages = max(1, (total + 9) // 10)
-        msg = f"📜 *User List* (Page {page + 1}/{total_pages})\n\n"
+        page = int(data.split("_")[2])
+        users = conn.execute("SELECT * FROM users ORDER BY user_id LIMIT 10 OFFSET ?",
+                             (page * 10,)).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        msg = f"📜 *User List* (Page {page+1}/{(total//10)+1})\n\n"
         for u in users:
-            vip = "⭐" if u["is_vip"] else "👤"
-            ban = " 🚫" if u["is_banned"] else ""
-            msg += f"{vip} `{u['user_id']}` — {u['name']} — {u['credits']} cr{ban}\n"
-
-        keyboard = []
+            v = "⭐" if u['is_vip'] else "👤"
+            b = "🚫" if u['is_banned'] else ""
+            msg += f"{v} `{u['user_id']}` — {u['name']} — {u['credits']} cr {b}\n"
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin_userlist_{page-1}"))
         if (page + 1) * 10 < total:
             nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin_userlist_{page+1}"))
+        kb = []
         if nav:
-            keyboard.append(nav)
-        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="admin_back")])
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            kb.append(nav)
+        kb.append([InlineKeyboardButton("⬅️ Back", callback_data="admin_back")])
+        await query.edit_message_text(msg, parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    if data == "admin_addcredit":
-        context.user_data["admin_state"] = "addcredit_id"
-        await query.edit_message_text("➕ *Add Credit*\n\nEnter the Telegram User ID:", parse_mode="Markdown")
+    elif data == "admin_addcredit":
+        context.user_data['admin_state'] = 'addcredit_id'
+        await query.edit_message_text("➕ *Add/Sub Credit*\n\nEnter the Telegram User ID:")
         return
 
-    if data == "admin_resetcredit":
-        context.user_data["admin_state"] = "resetcredit_id"
-        await query.edit_message_text("🧹 *Reset Credit*\n\nEnter the Telegram User ID:", parse_mode="Markdown")
+    elif data == "admin_resetcredit":
+        context.user_data['admin_state'] = 'resetcredit_id'
+        await query.edit_message_text("🧹 *Reset Credit*\n\nEnter the Telegram User ID:")
         return
 
-    if data == "admin_ban":
-        context.user_data["admin_state"] = "ban_id"
-        await query.edit_message_text("🚫 *Ban User*\n\nEnter the Telegram User ID:", parse_mode="Markdown")
+    elif data == "admin_ban":
+        context.user_data['admin_state'] = 'ban_id'
+        await query.edit_message_text("🚫 *Ban User*\n\nEnter the Telegram User ID:")
         return
 
-    if data == "admin_unban":
-        context.user_data["admin_state"] = "unban_id"
-        await query.edit_message_text("✅ *Unban User*\n\nEnter the Telegram User ID:", parse_mode="Markdown")
+    elif data == "admin_unban":
+        context.user_data['admin_state'] = 'unban_id'
+        await query.edit_message_text("✅ *Unban User*\n\nEnter the Telegram User ID:")
         return
 
-    if data == "admin_gencode":
-        context.user_data["admin_state"] = "gencode_credits"
-        await query.edit_message_text("🎟 *Generate Redeem Code*\n\nEnter credit amount:", parse_mode="Markdown")
+    elif data == "admin_gencode":
+        context.user_data['admin_state'] = 'gencode_credits'
+        await query.edit_message_text("🎟 *Generate Code*\n\nEnter credit amount:")
         return
 
-    if data == "admin_broadcast":
-        context.user_data["admin_state"] = "broadcast_msg"
-        await query.edit_message_text("📢 *Broadcast*\n\nSend the message to broadcast:", parse_mode="Markdown")
+    elif data == "admin_broadcast":
+        context.user_data['admin_state'] = 'broadcast_msg'
+        await query.edit_message_text("📢 Send the message to broadcast:")
         return
 
-    if data == "admin_vip":
-        context.user_data["admin_state"] = "vip_id"
-        await query.edit_message_text("⭐ *VIP Management*\n\nEnter the Telegram User ID:", parse_mode="Markdown")
+    elif data == "admin_vip":
+        context.user_data['admin_state'] = 'vip_id'
+        await query.edit_message_text("⭐ *VIP Management*\n\nEnter the Telegram User ID:")
         return
 
-    if data == "admin_back":
+    elif data == "admin_back":
+        context.user_data['admin_state'] = None
         await query.edit_message_text("⚙️ Admin Panel", reply_markup=get_admin_keyboard())
         return
 
-
-async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Returns True if handled."""
+# ==================== ADMIN INPUT ====================
+async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_admin(user_id):
-        return False
-
-    text = (update.message.text or "").strip()
-    state = context.user_data.get("admin_state")
+        return
+    text = update.message.text
+    state = context.user_data.get('admin_state')
     if not state:
-        return False
+        return
 
-    # ---------- Add credit ----------
-    if state == "addcredit_id":
-        if not text.isdigit():
+    conn = get_db()
+
+    if state == 'addcredit_id':
+        try:
+            tid = int(text)
+        except:
+            conn.close()
             await update.message.reply_text("❌ Invalid User ID.")
-            return True
-        target_id = int(text)
-        target = get_user(target_id)
-        if not target:
+            return
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
+            conn.close()
             await update.message.reply_text("❌ User not found.")
-            return True
-        context.user_data["admin_target"] = target_id
-        context.user_data["admin_state"] = "addcredit_amount"
+            return
+        context.user_data['admin_target'] = tid
+        context.user_data['admin_state'] = 'addcredit_amount'
         await update.message.reply_text(
-            f"👤 User: {target['name']}\n💰 Current Credits: {target['credits']}\n\n"
-            f"Enter amount to add (use -amount to subtract):"
+            f"👤 {t['name']}\n💰 Current: {t['credits']}\n\nEnter amount (+ to add, - to subtract):"
         )
-        return True
+        conn.close()
+        return
 
-    if state == "addcredit_amount":
+    elif state == 'addcredit_amount':
         try:
-            amount = int(text)
-        except ValueError:
-            await update.message.reply_text("❌ Invalid amount.")
-            return True
-        target_id = context.user_data.get("admin_target")
-        target = get_user(target_id)
-        if not target:
-            await update.message.reply_text("❌ User not found.")
-            context.user_data["admin_state"] = None
-            return True
-        conn = get_db()
-        try:
-            if amount >= 0:
-                conn.execute(
-                    "UPDATE users SET credits = credits + ? WHERE user_id = ?", (amount, target_id)
-                )
-            else:
-                conn.execute(
-                    "UPDATE users SET credits = MAX(0, credits + ?) WHERE user_id = ?", (amount, target_id)
-                )
-            conn.commit()
-        finally:
+            amt = int(text)
+        except:
             conn.close()
-        updated = get_user(target_id)
-        context.user_data["admin_state"] = None
+            await update.message.reply_text("❌ Invalid amount.")
+            return
+        tid = context.user_data.get('admin_target')
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
+            conn.close()
+            await update.message.reply_text("❌ User not found.")
+            return
+        if amt >= 0:
+            conn.execute("UPDATE users SET credits = credits + ? WHERE user_id = ?", (amt, tid))
+        else:
+            new_bal = max(0, t['credits'] + amt)
+            conn.execute("UPDATE users SET credits = ? WHERE user_id = ?", (new_bal, tid))
+        conn.commit()
+        updated = conn.execute("SELECT credits FROM users WHERE user_id = ?", (tid,)).fetchone()
+        conn.close()
+        context.user_data['admin_state'] = None
         await update.message.reply_text(
-            f"✅ Credits updated!\nUser: `{target_id}`\nAdded: {amount:+d}\nNew balance: {updated['credits']}",
-            parse_mode="Markdown",
+            f"✅ Done!\nUser: `{tid}`\nChange: {amt:+d}\nNew balance: {updated['credits']}",
+            parse_mode="Markdown"
         )
-        return True
+        return
 
-    # ---------- Reset credit ----------
-    if state == "resetcredit_id":
-        if not text.isdigit():
-            await update.message.reply_text("❌ Invalid User ID.")
-            return True
-        target_id = int(text)
-        if not get_user(target_id):
-            await update.message.reply_text("❌ User not found.")
-            return True
-        conn = get_db()
+    elif state == 'resetcredit_id':
         try:
-            conn.execute("UPDATE users SET credits = 0 WHERE user_id = ?", (target_id,))
-            conn.commit()
-        finally:
+            tid = int(text)
+        except:
             conn.close()
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(f"✅ Reset credits for `{target_id}` to 0.", parse_mode="Markdown")
-        return True
-
-    # ---------- Ban ----------
-    if state == "ban_id":
-        if not text.isdigit():
             await update.message.reply_text("❌ Invalid User ID.")
-            return True
-        target_id = int(text)
-        if not get_user(target_id):
-            await update.message.reply_text("❌ User not found.")
-            return True
-        conn = get_db()
-        try:
-            conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target_id,))
-            conn.commit()
-        finally:
+            return
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
             conn.close()
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(f"✅ Banned `{target_id}`.", parse_mode="Markdown")
-        return True
+            await update.message.reply_text("❌ User not found.")
+            return
+        conn.execute("UPDATE users SET credits = 0 WHERE user_id = ?", (tid,))
+        conn.commit()
+        conn.close()
+        context.user_data['admin_state'] = None
+        await update.message.reply_text(f"✅ Reset credits for `{tid}` to 0.", parse_mode="Markdown")
+        return
 
-    # ---------- Unban ----------
-    if state == "unban_id":
-        if not text.isdigit():
+    elif state == 'ban_id':
+        try:
+            tid = int(text)
+        except:
+            conn.close()
             await update.message.reply_text("❌ Invalid User ID.")
-            return True
-        target_id = int(text)
-        if not get_user(target_id):
-            await update.message.reply_text("❌ User not found.")
-            return True
-        conn = get_db()
-        try:
-            conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target_id,))
-            conn.commit()
-        finally:
+            return
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
             conn.close()
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(f"✅ Unbanned `{target_id}`.", parse_mode="Markdown")
-        return True
+            await update.message.reply_text("❌ User not found.")
+            return
+        conn.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (tid,))
+        conn.commit()
+        conn.close()
+        context.user_data['admin_state'] = None
+        await update.message.reply_text(f"✅ Banned `{tid}`.", parse_mode="Markdown")
+        return
 
-    # ---------- Gen code (credits) ----------
-    if state == "gencode_credits":
+    elif state == 'unban_id':
         try:
-            credits = int(text)
-        except ValueError:
+            tid = int(text)
+        except:
+            conn.close()
+            await update.message.reply_text("❌ Invalid User ID.")
+            return
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
+            conn.close()
+            await update.message.reply_text("❌ User not found.")
+            return
+        conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (tid,))
+        conn.commit()
+        conn.close()
+        context.user_data['admin_state'] = None
+        await update.message.reply_text(f"✅ Unbanned `{tid}`.", parse_mode="Markdown")
+        return
+
+    elif state == 'gencode_credits':
+        try:
+            cr = int(text)
+        except:
+            conn.close()
             await update.message.reply_text("❌ Invalid amount.")
-            return True
-        context.user_data["gencode_credits"] = credits
-        context.user_data["admin_state"] = "gencode_maxuses"
+            return
+        context.user_data['gencode_credits'] = cr
+        context.user_data['admin_state'] = 'gencode_maxuses'
         await update.message.reply_text("Enter max uses:")
-        return True
+        conn.close()
+        return
 
-    if state == "gencode_maxuses":
+    elif state == 'gencode_maxuses':
         try:
-            max_uses = int(text)
-        except ValueError:
+            mu = int(text)
+        except:
+            conn.close()
             await update.message.reply_text("❌ Invalid number.")
-            return True
-        credits = context.user_data.get("gencode_credits", 0)
+            return
+        cr = context.user_data.get('gencode_credits', 0)
         code = generate_redeem_code()
-        conn = get_db()
-        try:
-            conn.execute(
-                "INSERT INTO redeem_codes (code, credits, max_uses, created_at) VALUES (?, ?, ?, ?)",
-                (code, credits, max_uses, datetime.now().isoformat()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(
-            f"🎟 *Redeem Code Generated!*\n\nCode: `{code}`\nCredits: {credits}\nMax Uses: {max_uses}",
-            parse_mode="Markdown",
+        conn.execute(
+            "INSERT INTO redeem_codes (code, credits, max_uses, created_at) VALUES (?, ?, ?, ?)",
+            (code, cr, mu, datetime.now().isoformat())
         )
-        return True
+        conn.commit()
+        conn.close()
+        context.user_data['admin_state'] = None
+        await update.message.reply_text(
+            f"🎟 *Code Generated!*\n\nCode: `{code}`\nCredits: {cr}\nMax Uses: {mu}",
+            parse_mode="Markdown"
+        )
+        return
 
-    # ---------- Broadcast ----------
-    if state == "broadcast_msg":
-        conn = get_db()
-        try:
-            all_users = conn.execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()
-        finally:
-            conn.close()
-
-        context.user_data["admin_state"] = None
-        success = 0
-        failed = 0
-        for u in all_users:
+    elif state == 'broadcast_msg':
+        conn.close()
+        context.user_data['admin_state'] = None
+        all_u = get_db().execute("SELECT user_id FROM users WHERE is_banned = 0").fetchall()
+        ok, fail = 0, 0
+        for u in all_u:
             try:
-                await context.bot.send_message(chat_id=u["user_id"], text=text)
-                success += 1
-            except Exception:
-                failed += 1
-            await asyncio.sleep(0.05)  # rate limit friendly
-        await update.message.reply_text(
-            f"📢 *Broadcast Complete!*\n\n✅ Sent: {success}\n❌ Failed: {failed}",
-            parse_mode="Markdown",
-        )
-        return True
+                await context.bot.send_message(chat_id=u['user_id'], text=text)
+                ok += 1
+            except:
+                fail += 1
+        await update.message.reply_text(f"📢 Done!\n✅ Sent: {ok}\n❌ Failed: {fail}")
+        return
 
-    # ---------- VIP ----------
-    if state == "vip_id":
-        if not text.isdigit():
+    elif state == 'vip_id':
+        try:
+            tid = int(text)
+        except:
+            conn.close()
             await update.message.reply_text("❌ Invalid User ID.")
-            return True
-        target_id = int(text)
-        target = get_user(target_id)
-        if not target:
+            return
+        t = conn.execute("SELECT * FROM users WHERE user_id = ?", (tid,)).fetchone()
+        if not t:
+            conn.close()
             await update.message.reply_text("❌ User not found.")
-            return True
-        context.user_data["admin_target"] = target_id
-        context.user_data["admin_state"] = "vip_days"
+            return
+        context.user_data['admin_target'] = tid
+        context.user_data['admin_state'] = 'vip_days'
         await update.message.reply_text(
-            f"👤 User: {target['name']}\n"
-            f"⭐ Current VIP: {'Yes' if target['is_vip'] else 'No'}\n\n"
-            f"Enter VIP days (0 to remove VIP):"
+            f"👤 {t['name']}\n⭐ VIP: {'Yes' if t['is_vip'] else 'No'}\n\n"
+            f"Enter VIP days (0 to remove):"
         )
-        return True
+        conn.close()
+        return
 
-    if state == "vip_days":
+    elif state == 'vip_days':
         try:
             days = int(text)
-        except ValueError:
-            await update.message.reply_text("❌ Invalid number.")
-            return True
-        target_id = context.user_data.get("admin_target")
-        conn = get_db()
-        try:
-            if days <= 0:
-                conn.execute(
-                    "UPDATE users SET is_vip = 0, vip_expiry = NULL WHERE user_id = ?", (target_id,)
-                )
-            else:
-                expiry = (datetime.now() + timedelta(days=days)).isoformat()
-                conn.execute(
-                    "UPDATE users SET is_vip = 1, vip_expiry = ? WHERE user_id = ?",
-                    (expiry, target_id),
-                )
-            conn.commit()
-        finally:
+        except:
             conn.close()
-        context.user_data["admin_state"] = None
-        await update.message.reply_text(f"✅ VIP updated for `{target_id}`.", parse_mode="Markdown")
-        return True
+            await update.message.reply_text("❌ Invalid number.")
+            return
+        tid = context.user_data.get('admin_target')
+        if days <= 0:
+            conn.execute("UPDATE users SET is_vip = 0, vip_expiry = NULL WHERE user_id = ?", (tid,))
+        else:
+            expiry = (datetime.now() + timedelta(days=days)).isoformat()
+            conn.execute("UPDATE users SET is_vip = 1, vip_expiry = ? WHERE user_id = ?", (expiry, tid))
+        conn.commit()
+        conn.close()
+        context.user_data['admin_state'] = None
+        await update.message.reply_text(f"✅ VIP updated for `{tid}`.", parse_mode="Markdown")
+        return
 
-    return False
+    conn.close()
 
-
-# ==================== ERROR HANDLER ====================
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
-
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Update {update} caused error {context.error}")
 
 # ==================== MAIN ====================
-def build_application():
+def main():
+    init_db()
+
+    # Start Flask web server in background thread (for Render + UptimeRobot)
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    logger.info("Web server started for uptime monitoring")
+
+    # Build Telegram application
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(check_join_callback, pattern="^check_join$"))
+    application.add_handler(CallbackQueryHandler(check_join_callback, pattern="check_join"))
     application.add_handler(CallbackQueryHandler(sms_duration_callback, pattern="^sms_"))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     application.add_error_handler(error_handler)
-    return application
 
-
-def main():
-    init_db()
-    application = build_application()
-
-    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
-    webhook_base = os.environ.get("WEBHOOK_URL", render_url).strip()
-    port = int(os.environ.get("PORT", "8443"))
-
-    if webhook_base.startswith("http"):
-        url_path = BOT_TOKEN
-        full_webhook = f"{webhook_base.rstrip('/')}/{url_path}"
-        logger.info(f"Starting webhook mode on 0.0.0.0:{port} -> {full_webhook}")
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=url_path,
-            webhook_url=full_webhook,
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-    else:
-        logger.info("Starting polling mode (no WEBHOOK_URL / RENDER_EXTERNAL_URL set)")
-        application.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-        )
-
+    print("🤖 Bot is running...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
