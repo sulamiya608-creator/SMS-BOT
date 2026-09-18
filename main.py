@@ -6,6 +6,7 @@ import requests
 import logging
 import asyncio
 import threading
+from urllib.parse import quote
 from datetime import datetime, timedelta
 from flask import Flask
 
@@ -27,6 +28,7 @@ ADMIN_USERNAME = "jannat2764"          # without @
 DEVELOPER_USERNAME = "jannat2764"      # without @
 
 API_URL = "https://kalqqkfhzkj.vercel.app/bomb"
+CUSTOM_SMS_API = "https://stapi.st-shop.xyz/customsms.php"
 
 SMS_DURATIONS = {
     "2": {"minutes": 2, "credits": 5},
@@ -46,6 +48,10 @@ CREDIT_PACKAGES = {
 DAILY_BONUS_CREDITS = 2
 DAILY_BONUS_COOLDOWN_HOURS = 24
 REFERRAL_REWARD_CREDITS = 5
+
+# Custom SMS settings
+CUSTOM_SMS_COST = 2
+CUSTOM_SMS_MAX_LENGTH = 130
 
 # Render-এ পারমিশন সমস্যা এড়াতে /tmp ব্যবহার
 DB_FILE = "/tmp/bot_database.db"
@@ -155,13 +161,24 @@ def is_vip_active(user):
     except:
         return False
 
+def is_valid_bd_number(number):
+    """Bangladesh mobile number validation: 11 digits starting with 01"""
+    if not number.isdigit() or len(number) != 11:
+        return False
+    if not number.startswith("01"):
+        return False
+    # Valid operator prefixes: 013-019
+    if number[2] not in "3456789":
+        return False
+    return True
+
 # ==================== KEYBOARDS ====================
 def get_main_keyboard(user_id):
     keyboard = [
-        [KeyboardButton("📩 SMS Bomber"), KeyboardButton("👤 Profile")],
-        [KeyboardButton("💳 Buy Subscription & Credit"), KeyboardButton("🎁 Daily Bonus")],
-        [KeyboardButton("🎁 Refer & Earn"), KeyboardButton("🎟 Redeem Code")],
-        [KeyboardButton("📞 Support")]
+        [KeyboardButton("📩 SMS Bomber"), KeyboardButton("✉️ Custom SMS")],
+        [KeyboardButton("👤 Profile"), KeyboardButton("💳 Buy Subscription & Credit")],
+        [KeyboardButton("🎁 Daily Bonus"), KeyboardButton("🎁 Refer & Earn")],
+        [KeyboardButton("🎟 Redeem Code"), KeyboardButton("📞 Support")]
     ]
     if is_admin(user_id):
         keyboard.append([KeyboardButton("⚙️ Admin Panel")])
@@ -177,6 +194,13 @@ def get_duration_keyboard():
         [InlineKeyboardButton("4 Min (10 cr)", callback_data="sms_dur_4"),
          InlineKeyboardButton("5 Min (12 cr)", callback_data="sms_dur_5")],
         [InlineKeyboardButton("❌ Cancel", callback_data="sms_cancel")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_custom_confirm_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("✅ Send SMS", callback_data="custom_send"),
+         InlineKeyboardButton("❌ Cancel", callback_data="custom_cancel")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -204,7 +228,6 @@ def get_join_keyboard():
 
 # ==================== FORCE JOIN CHECK ====================
 async def is_user_joined(context, user_id):
-    """Return True if user is a member, False otherwise"""
     try:
         member = await context.bot.get_chat_member(
             chat_id=f"@{CHANNEL_USERNAME}",
@@ -217,7 +240,6 @@ async def is_user_joined(context, user_id):
         return False
     except Exception as e:
         logger.error(f"ForceJoin check error: {e}")
-        # If bot is not admin or any API error, allow (don't block user)
         return True
 
 async def send_join_prompt(update_or_query, context):
@@ -246,13 +268,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
-    # Force join check
     joined = await is_user_joined(context, user_id)
     if not joined:
         await send_join_prompt(update, context)
         return
 
-    # Referral
     referred_by = None
     if context.args:
         ref_code = context.args[0]
@@ -317,7 +337,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_admin_input(update, context)
         return
 
-    # Ensure user exists
     existing = get_user(user_id)
     if not existing:
         joined = await is_user_joined(context, user_id)
@@ -340,6 +359,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['state'] = 'awaiting_number'
         await update.message.reply_text(
             "📩 *SMS Bomber*\n\nSend me a phone number (e.g. `018XXXXXXXX`):",
+            parse_mode="Markdown",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    # ============ CUSTOM SMS ============
+    elif text == "✉️ Custom SMS":
+        joined = await is_user_joined(context, user_id)
+        if not joined:
+            await send_join_prompt(update, context)
+            return
+        context.user_data['state'] = 'custom_sms_number'
+        context.user_data['custom_sms_number'] = None
+        context.user_data['custom_sms_message'] = None
+        await update.message.reply_text(
+            f"✉️ *CUSTOM SMS*\n\n"
+            f"Send 1 custom SMS\n"
+            f"💳 Cost: {CUSTOM_SMS_COST} Credits per message\n\n"
+            f"📱 Enter the recipient number:\n"
+            f"Example: `01XXXXXXXXX`",
             parse_mode="Markdown",
             reply_markup=get_back_keyboard()
         )
@@ -427,9 +466,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "📞 *Support*\n\n"
             "💰 *Credits:* Used to run SMS tests.\n\n"
-            "📩 *SMS Test Pricing:*\n"
+            "📩 *SMS Bomber Pricing:*\n"
             "• 2 min = 5 credits\n• 3 min = 8 credits\n"
             "• 4 min = 10 credits\n• 5 min = 12 credits\n\n"
+            f"✉️ *Custom SMS:* {CUSTOM_SMS_COST} credits per message\n\n"
             "⭐ *VIP:* Unlimited usage, no credit deduction.\n\n"
             f"💳 *Buy credits/VIP:* Contact @{ADMIN_USERNAME}\n\n"
             "🎟 *Redeem Codes:* Use the Redeem Code menu.\n\n"
@@ -454,6 +494,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "⬅️ Back":
         context.user_data['state'] = None
         context.user_data['admin_state'] = None
+        context.user_data['custom_sms_number'] = None
+        context.user_data['custom_sms_message'] = None
         await update.message.reply_text("Main Menu", reply_markup=get_main_keyboard(user_id))
         return
 
@@ -475,6 +517,55 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📱 Number: `{number}`\n\nSelect duration:",
             parse_mode="Markdown",
             reply_markup=get_duration_keyboard()
+        )
+        return
+
+    # ============ CUSTOM SMS: NUMBER INPUT ============
+    if state == 'custom_sms_number':
+        joined = await is_user_joined(context, user_id)
+        if not joined:
+            await send_join_prompt(update, context)
+            return
+        number = text.strip()
+        if not is_valid_bd_number(number):
+            await update.message.reply_text(
+                "❌ Invalid Bangladesh mobile number.\n\n"
+                "Must be 11 digits starting with 01 (e.g. `017XXXXXXXX`).\n\n"
+                "📱 Enter the recipient number again:",
+                parse_mode="Markdown"
+            )
+            return
+        context.user_data['custom_sms_number'] = number
+        context.user_data['state'] = 'custom_sms_message'
+        await update.message.reply_text(
+            f"📝 Enter your message\n"
+            f"Maximum: {CUSTOM_SMS_MAX_LENGTH} অক্ষর",
+            reply_markup=get_back_keyboard()
+        )
+        return
+
+    # ============ CUSTOM SMS: MESSAGE INPUT ============
+    if state == 'custom_sms_message':
+        message = text.strip()
+        if not message:
+            await update.message.reply_text("❌ Message cannot be empty. Please enter your message.")
+            return
+        if len(message) > CUSTOM_SMS_MAX_LENGTH:
+            await update.message.reply_text(
+                f"❌ Message too long! Maximum {CUSTOM_SMS_MAX_LENGTH} characters allowed.\n"
+                f"Your message: {len(message)} characters"
+            )
+            return
+        context.user_data['custom_sms_message'] = message
+        context.user_data['state'] = 'custom_sms_confirm'
+        number = context.user_data.get('custom_sms_number')
+        await update.message.reply_text(
+            f"📱 Number: `{number}`\n"
+            f"💬 Message: {message}\n"
+            f"💳 Cost: {CUSTOM_SMS_COST} Credits\n\n"
+            f"Confirm to send?",
+            parse_mode="Markdown",
+            reply_markup=get_custom_confirm_keyboard()
         )
         return
 
@@ -519,7 +610,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Use the menu below.", reply_markup=get_main_keyboard(user_id))
 
-# ==================== SMS CALLBACK ====================
+# ==================== SMS DURATION CALLBACK ====================
 async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -562,7 +653,6 @@ async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TY
         conn.commit()
         conn.close()
 
-    # API request in background thread
     def call_api():
         try:
             r = requests.post(API_URL, json={"number": number, "amount": duration['minutes']},
@@ -598,6 +688,127 @@ async def sms_duration_callback(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data['state'] = None
     await context.bot.send_message(chat_id=user_id, text="Main Menu",
                                    reply_markup=get_main_keyboard(user_id))
+
+# ==================== CUSTOM SMS CALLBACK ====================
+async def custom_sms_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    data = query.data
+
+    if data == "custom_cancel":
+        context.user_data['state'] = None
+        context.user_data['custom_sms_number'] = None
+        context.user_data['custom_sms_message'] = None
+        await query.edit_message_text("❌ Cancelled.")
+        await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                       reply_markup=get_main_keyboard(user_id))
+        return
+
+    if data == "custom_send":
+        # Prevent duplicate sends
+        if context.user_data.get('custom_sending'):
+            await query.answer("⏳ Already processing...", show_alert=True)
+            return
+
+        number = context.user_data.get('custom_sms_number')
+        message = context.user_data.get('custom_sms_message')
+
+        if not number or not message:
+            await query.edit_message_text("❌ Session expired. Please start again.")
+            await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                           reply_markup=get_main_keyboard(user_id))
+            return
+
+        u = get_user(user_id)
+        if u['credits'] < CUSTOM_SMS_COST:
+            await query.edit_message_text(
+                f"❌ *Insufficient Credits!*\n\n"
+                f"Required: {CUSTOM_SMS_COST} credits\n"
+                f"Your balance: {u['credits']} credits\n\n"
+                f"Buy more from the menu.",
+                parse_mode="Markdown"
+            )
+            context.user_data['state'] = None
+            context.user_data['custom_sms_number'] = None
+            context.user_data['custom_sms_message'] = None
+            return
+
+        # Lock to prevent duplicate
+        context.user_data['custom_sending'] = True
+
+        await query.edit_message_text("⏳ Processing your SMS...")
+
+        # API call (synchronous in thread)
+        api_success = False
+        api_response = ""
+
+        def call_custom_api():
+            nonlocal api_success, api_response
+            try:
+                url = f"{CUSTOM_SMS_API}?phone={quote(number)}&message={quote(message)}"
+                r = requests.get(url, timeout=20)
+                api_response = r.text
+                logger.info(f"Custom SMS API: {r.status_code} - {r.text}")
+                if r.status_code == 200:
+                    api_success = True
+            except Exception as e:
+                logger.error(f"Custom SMS API Error: {e}")
+                api_response = str(e)
+
+        await asyncio.to_thread(call_custom_api)
+
+        if api_success:
+            # Deduct credits only after success
+            conn = get_db()
+            conn.execute("UPDATE users SET credits = credits - ? WHERE user_id = ?",
+                         (CUSTOM_SMS_COST, user_id))
+            conn.execute("UPDATE users SET total_requests = total_requests + 1 WHERE user_id = ?",
+                         (user_id,))
+            conn.commit()
+            new_bal = conn.execute("SELECT credits FROM users WHERE user_id = ?",
+                                   (user_id,)).fetchone()['credits']
+            conn.close()
+
+            await query.edit_message_text(
+                f"✅ *SMS Sent Successfully!*\n\n"
+                f"📱 Number: `{number}`\n"
+                f"💬 Message: {message}\n"
+                f"💳 Credits used: {CUSTOM_SMS_COST}\n"
+                f"💰 New balance: {new_bal}",
+                parse_mode="Markdown"
+            )
+
+            # Notify admin
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_IDS[0],
+                    text=(f"✉️ NEW CUSTOM SMS\n\n"
+                          f"👤 {u['name']} (@{u['username'] or 'NoUsername'})\n"
+                          f"🆔 `{user_id}`\n📱 {number}\n💬 {message}\n"
+                          f"💳 {CUSTOM_SMS_COST} credits"),
+                    parse_mode="Markdown"
+                )
+            except Exception as e:
+                logger.error(f"Admin notify: {e}")
+        else:
+            await query.edit_message_text(
+                f"❌ *Failed to send SMS!*\n\n"
+                f"No credits were deducted.\n"
+                f"Please try again later.\n\n"
+                f"Error: {api_response[:150]}",
+                parse_mode="Markdown"
+            )
+
+        # Cleanup
+        context.user_data['state'] = None
+        context.user_data['custom_sms_number'] = None
+        context.user_data['custom_sms_message'] = None
+        context.user_data['custom_sending'] = False
+
+        await context.bot.send_message(chat_id=user_id, text="Main Menu",
+                                       reply_markup=get_main_keyboard(user_id))
+        return
 
 # ==================== ADMIN CALLBACKS ====================
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -923,6 +1134,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(check_join_callback, pattern="check_join"))
     application.add_handler(CallbackQueryHandler(sms_duration_callback, pattern="^sms_"))
+    application.add_handler(CallbackQueryHandler(custom_sms_callback, pattern="^custom_"))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
